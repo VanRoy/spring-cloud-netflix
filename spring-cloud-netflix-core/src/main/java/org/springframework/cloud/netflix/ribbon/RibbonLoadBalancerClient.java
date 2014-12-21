@@ -1,17 +1,17 @@
 package org.springframework.cloud.netflix.ribbon;
 
 import java.net.URI;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Throwables;
-import com.netflix.loadbalancer.*;
-import com.netflix.servo.monitor.Stopwatch;
 import org.springframework.cloud.client.ServiceInstance;
 import org.springframework.cloud.client.loadbalancer.LoadBalancerClient;
 import org.springframework.cloud.client.loadbalancer.LoadBalancerRequest;
+
+import com.google.common.base.Throwables;
+import com.netflix.loadbalancer.ILoadBalancer;
+import com.netflix.loadbalancer.Server;
+import com.netflix.loadbalancer.ServerStats;
+import com.netflix.servo.monitor.Stopwatch;
 
 /**
  * @author Spencer Gibb
@@ -19,25 +19,16 @@ import org.springframework.cloud.client.loadbalancer.LoadBalancerRequest;
  */
 public class RibbonLoadBalancerClient implements LoadBalancerClient {
 
-	private RibbonClientPreprocessor ribbonClientPreprocessor;
-
     private SpringClientFactory clientFactory;
 
-	private Map<String, ILoadBalancer> balancers = new HashMap<>();
-    private Map<String, RibbonLoadBalancerContext> contexts = new HashMap<>();
-
-	public RibbonLoadBalancerClient(RibbonClientPreprocessor ribbonClientPreprocessor, SpringClientFactory clientFactory, List<BaseLoadBalancer> balancers) {
-		this.ribbonClientPreprocessor = ribbonClientPreprocessor;
+	public RibbonLoadBalancerClient(SpringClientFactory clientFactory) {
 		this.clientFactory = clientFactory;
-		for (BaseLoadBalancer balancer : balancers) {
-			this.balancers.put(balancer.getName(), balancer);
-		}
 	}
 
     @Override
     public URI reconstructURI(ServiceInstance instance, URI original) {
         String serviceId = instance.getServiceId();
-        RibbonLoadBalancerContext context = getOrCreateLoadBalancerContext(serviceId, getLoadBalancer(serviceId));
+        RibbonLoadBalancerContext context = clientFactory.getLoadBalancerContext(serviceId);
         Server server = new Server(instance.getHost(), instance.getPort());
         return context.reconstructURIWithServer(server, original);
     }
@@ -50,7 +41,7 @@ public class RibbonLoadBalancerClient implements LoadBalancerClient {
     @Override
     public <T> T execute(String serviceId, LoadBalancerRequest<T> request) {
         ILoadBalancer loadBalancer = getLoadBalancer(serviceId);
-        RibbonLoadBalancerContext context = getOrCreateLoadBalancerContext(serviceId, loadBalancer);
+        RibbonLoadBalancerContext context = clientFactory.getLoadBalancerContext(serviceId);
         Server server = getServer(serviceId, loadBalancer);
         RibbonServer ribbonServer = new RibbonServer(serviceId, server);
 
@@ -76,18 +67,10 @@ public class RibbonLoadBalancerClient implements LoadBalancerClient {
         context.noteRequestCompletion(serverStats, entity, exception, duration, null/*errorHandler*/);
     }
 
-    protected RibbonLoadBalancerContext getOrCreateLoadBalancerContext(String serviceId, ILoadBalancer loadBalancer) {
-        RibbonLoadBalancerContext context = contexts.get(serviceId);
-        if (context == null) {
-            context = new RibbonLoadBalancerContext(loadBalancer);
-            contexts.put(serviceId, context);
-        }
-        return context;
-    }
-
     protected Server getServer(String serviceId) {
         return getServer(serviceId, getLoadBalancer(serviceId));
     }
+
     protected Server getServer(String serviceId, ILoadBalancer loadBalancer) {
         Server server = loadBalancer.chooseServer("default");
         if (server == null) {
@@ -98,12 +81,7 @@ public class RibbonLoadBalancerClient implements LoadBalancerClient {
     }
 
     protected ILoadBalancer getLoadBalancer(String serviceId) {
-        ribbonClientPreprocessor.preprocess(serviceId);
-        ILoadBalancer loadBalancer = this.balancers.get(serviceId);
-        if (loadBalancer == null) {
-            loadBalancer = clientFactory.getNamedLoadBalancer(serviceId);
-        }
-        return loadBalancer;
+    	return clientFactory.getLoadBalancer(serviceId);
     }
 
     protected static class RibbonServer implements ServiceInstance {

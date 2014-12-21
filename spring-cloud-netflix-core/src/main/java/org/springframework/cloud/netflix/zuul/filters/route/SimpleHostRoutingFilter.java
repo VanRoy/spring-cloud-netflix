@@ -1,6 +1,5 @@
 package org.springframework.cloud.netflix.zuul.filters.route;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Socket;
@@ -14,21 +13,19 @@ import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Enumeration;
+import java.util.List;
 import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.zip.GZIPInputStream;
 
-import javax.annotation.Nullable;
+import javax.annotation.PreDestroy;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.io.IOUtils;
 import org.apache.http.Header;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
@@ -53,18 +50,16 @@ import org.apache.http.params.HttpParams;
 import org.apache.http.protocol.HttpContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cloud.netflix.zuul.filters.ProxyRequestHelper;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.util.StringUtils;
 
-import com.google.common.base.Optional;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
 import com.netflix.config.DynamicIntProperty;
 import com.netflix.config.DynamicPropertyFactory;
 import com.netflix.zuul.ZuulFilter;
 import com.netflix.zuul.constants.ZuulConstants;
-import com.netflix.zuul.context.Debug;
 import com.netflix.zuul.context.RequestContext;
-import com.netflix.zuul.util.HTTPRequestUtils;
 
 public class SimpleHostRoutingFilter extends ZuulFilter {
 
@@ -72,6 +67,7 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 
 	private static final Logger LOG = LoggerFactory
 			.getLogger(SimpleHostRoutingFilter.class);
+
 	private static final Runnable CLIENTLOADER = new Runnable() {
 		@Override
 		public void run() {
@@ -89,7 +85,7 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 	private static final AtomicReference<HttpClient> CLIENT = new AtomicReference<HttpClient>(
 			newClient());
 
-	private static final Timer CONNECTION_MANAGER_TIMER = new Timer(true);
+	private static final Timer CONNECTION_MANAGER_TIMER = new Timer("SimpleHostRoutingFilter.CONNECTION_MANAGER_TIMER", true);
 
 	// cleans expired connections at an interval
 	static {
@@ -130,6 +126,21 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 		cm.setDefaultMaxPerRoute(Integer.parseInt(System.getProperty(
 				"zuul.max.host.connections", "20")));
 		return cm;
+	}
+
+	private ProxyRequestHelper helper;
+
+	public SimpleHostRoutingFilter() {
+		this(new ProxyRequestHelper());
+	}
+
+	public SimpleHostRoutingFilter(ProxyRequestHelper helper) {
+		this.helper = helper;
+	}
+
+	@PreDestroy
+	public void stop() {
+		CONNECTION_MANAGER_TIMER.cancel();
 	}
 
 	@Override
@@ -205,7 +216,9 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 	public Object run() {
 		RequestContext context = RequestContext.getCurrentContext();
 		HttpServletRequest request = context.getRequest();
-		Header[] headers = buildZuulRequestHeaders(request);
+		MultiValueMap<String, String> headers = helper.buildZuulRequestHeaders(request);
+		MultiValueMap<String, String> params = helper
+				.buildZuulRequestQueryParams(request);
 		String verb = getVerb(request);
 		InputStream requestEntity = getRequestBody(request);
 		HttpClient httpclient = CLIENT.get();
@@ -217,19 +230,23 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 
 		try {
 			HttpResponse response = forward(httpclient, verb, uri, request, headers,
-					requestEntity);
+					params, requestEntity);
 			setResponse(response);
 		}
 		catch (Exception e) {
 			context.set("error.status_code", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-            context.set("error.exception", e);
+			context.set("error.exception", e);
 		}
 		return null;
 	}
 
 	private HttpResponse forward(HttpClient httpclient, String verb, String uri,
-			HttpServletRequest request, Header[] headers, InputStream requestEntity)
+			HttpServletRequest request, MultiValueMap<String, String> headers,
+			MultiValueMap<String, String> params, InputStream requestEntity)
 			throws Exception {
+
+		Map<String, Object> info = helper
+				.debug(verb, uri, headers, params, requestEntity);
 
 		URL host = RequestContext.getCurrentContext().getRouteHost();
 		HttpHost httpHost = getHttpHost(host);
@@ -237,7 +254,7 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 
 		HttpRequest httpRequest;
 
-		switch (verb) {
+		switch (verb.toUpperCase()) {
 		case "POST":
 			HttpPost httpPost = new HttpPost(uri + getQueryString());
 			httpRequest = httpPost;
@@ -256,10 +273,12 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 		}
 
 		try {
-			httpRequest.setHeaders(headers);
+			httpRequest.setHeaders(convertHeaders(headers));
 			LOG.debug(httpHost.getHostName() + " " + httpHost.getPort() + " "
 					+ httpHost.getSchemeName());
 			HttpResponse zuulResponse = forwardRequest(httpclient, httpHost, httpRequest);
+			helper.appendDebug(info, zuulResponse.getStatusLine().getStatusCode(),
+					revertHeaders(zuulResponse.getAllHeaders()));
 			return zuulResponse;
 		}
 		finally {
@@ -271,18 +290,40 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 
 	}
 
+	private MultiValueMap<String, String> revertHeaders(Header[] headers) {
+		MultiValueMap<String, String> map = new LinkedMultiValueMap<String, String>();
+		for (Header header : headers) {
+			String name = header.getName();
+			if (!map.containsKey(name)) {
+				map.put(name, new ArrayList<String>());
+			}
+			map.get(name).add(header.getValue());
+		}
+		return map;
+	}
+
+	private Header[] convertHeaders(MultiValueMap<String, String> headers) {
+		List<Header> list = new ArrayList<>();
+		for (String name : headers.keySet()) {
+			for (String value : headers.get(name)) {
+				list.add(new BasicHeader(name, value));
+			}
+		}
+		return list.toArray(new BasicHeader[0]);
+	}
+
 	private HttpResponse forwardRequest(HttpClient httpclient, HttpHost httpHost,
 			HttpRequest httpRequest) throws IOException {
 		return httpclient.execute(httpHost, httpRequest);
 	}
 
-	String getQueryString() {
+	private String getQueryString() {
 		HttpServletRequest request = RequestContext.getCurrentContext().getRequest();
 		String query = request.getQueryString();
 		return (query != null) ? "?" + query : "";
 	}
 
-	HttpHost getHttpHost(URL host) {
+	private HttpHost getHttpHost(URL host) {
 		HttpHost httpHost = new HttpHost(host.getHost(), host.getPort(),
 				host.getProtocol());
 		return httpHost;
@@ -299,142 +340,15 @@ public class SimpleHostRoutingFilter extends ZuulFilter {
 		return requestEntity;
 	}
 
-	boolean isValidHeader(String name) {
-		if (name.toLowerCase().contains("content-length"))
-			return false;
-		if (!RequestContext.getCurrentContext().getResponseGZipped()) {
-			if (name.toLowerCase().contains("accept-encoding"))
-				return false;
-		}
-		return true;
-	}
-
-	private Header[] buildZuulRequestHeaders(HttpServletRequest request) {
-
-		ArrayList<Header> headers = new ArrayList<>();
-		Enumeration headerNames = request.getHeaderNames();
-		while (headerNames.hasMoreElements()) {
-			String name = (String) headerNames.nextElement();
-			String value = request.getHeader(name);
-			if (isValidHeader(name))
-				headers.add(new BasicHeader(name, value));
-		}
-
-		Map<String, String> zuulRequestHeaders = RequestContext.getCurrentContext()
-				.getZuulRequestHeaders();
-
-		for (String it : zuulRequestHeaders.keySet()) {
-			final String name = it.toLowerCase();
-			Optional<Header> h = Iterables.tryFind(headers, new Predicate<Header>() {
-				@Override
-				public boolean apply(@Nullable Header input) {
-					return input.getName().equals(name);
-				}
-			});
-			if (h.isPresent()) {
-				headers.remove(h);
-			}
-			headers.add(new BasicHeader(it, zuulRequestHeaders.get(it)));
-		}
-
-		if (RequestContext.getCurrentContext().getResponseGZipped()) {
-			headers.add(new BasicHeader("accept-encoding", "deflate, gzip"));
-		}
-		return headers.toArray(new Header[0]);
-	}
-
 	private String getVerb(HttpServletRequest request) {
 		String sMethod = request.getMethod();
 		return sMethod.toUpperCase();
 	}
 
-	private String getVerb(String sMethod) {
-		if (sMethod == null)
-			return "GET";
-		sMethod = sMethod.toLowerCase();
-		if (sMethod.equalsIgnoreCase("post"))
-			return "POST";
-		if (sMethod.equalsIgnoreCase("put"))
-			return "PUT";
-		if (sMethod.equalsIgnoreCase("delete"))
-			return "DELETE";
-		if (sMethod.equalsIgnoreCase("options"))
-			return "OPTIONS";
-		if (sMethod.equalsIgnoreCase("head"))
-			return "HEAD";
-		return "GET";
-	}
-
 	private void setResponse(HttpResponse response) throws IOException {
-		RequestContext context = RequestContext.getCurrentContext();
-
-		RequestContext.getCurrentContext().set("hostZuulResponse", response);
-		RequestContext.getCurrentContext().setResponseStatusCode(
-				response.getStatusLine().getStatusCode());
-		if (response.getEntity() != null) {
-			RequestContext.getCurrentContext().setResponseDataStream(
-					response.getEntity().getContent());
-		}
-
-		boolean isOriginResponseGzipped = false;
-
-		for (Header h : response.getHeaders(CONTENT_ENCODING)) {
-			if (HTTPRequestUtils.getInstance().isGzipped(h.getValue())) {
-				isOriginResponseGzipped = true;
-				break;
-			}
-		}
-		context.setResponseGZipped(isOriginResponseGzipped);
-
-		if (Debug.debugRequest()) {
-			for (Header header : response.getAllHeaders()) {
-				if (isValidHeader(header)) {
-					RequestContext.getCurrentContext().addZuulResponseHeader(
-							header.getName(), header.getValue());
-					Debug.addRequestDebug("ORIGIN_RESPONSE:: < " + header.getName() + ","
-							+ header.getValue());
-				}
-			}
-
-			if (context.getResponseDataStream() != null) {
-				byte[] origBytes = IOUtils.toByteArray(context.getResponseDataStream());
-				ByteArrayInputStream byteStream = new ByteArrayInputStream(origBytes);
-				InputStream inputStream = byteStream;
-				if (RequestContext.getCurrentContext().getResponseGZipped()) {
-					inputStream = new GZIPInputStream(byteStream);
-				}
-
-				context.setResponseDataStream(new ByteArrayInputStream(origBytes));
-			}
-
-		}
-		else {
-			for (Header header : response.getAllHeaders()) {
-				RequestContext ctx = RequestContext.getCurrentContext();
-				ctx.addOriginResponseHeader(header.getName(), header.getValue());
-
-				if (header.getName().equalsIgnoreCase("content-length"))
-					ctx.setOriginContentLength(header.getValue());
-
-				if (isValidHeader(header)) {
-					ctx.addZuulResponseHeader(header.getName(), header.getValue());
-				}
-			}
-		}
-
-	}
-
-	boolean isValidHeader(Header header) {
-		switch (header.getName().toLowerCase()) {
-		case "connection":
-		case "content-length":
-		case "content-encoding":
-		case "server":
-		case "transfer-encoding":
-			return false;
-		default:
-			return true;
-		}
+		helper.setResponse(response.getStatusLine().getStatusCode(),
+				response.getEntity() == null ? null : response.getEntity().getContent(),
+				revertHeaders(response.getAllHeaders()));
 	}
 
 	public static class MySSLSocketFactory extends SSLSocketFactory {

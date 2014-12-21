@@ -1,105 +1,28 @@
+/*
+ * Copyright 2013-2014 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.springframework.cloud.netflix.zuul;
 
-import java.lang.reflect.Field;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
-
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.cloud.client.discovery.DiscoveryClient;
-import org.springframework.cloud.context.environment.EnvironmentChangeEvent;
-import org.springframework.context.ApplicationListener;
-import org.springframework.core.env.CompositePropertySource;
-import org.springframework.util.ReflectionUtils;
+import java.util.Collection;
 
 /**
- * @author Spencer Gibb
+ * @author Dave Syer
+ *
  */
-@Slf4j
-public class RouteLocator implements ApplicationListener<EnvironmentChangeEvent> {
+public interface RouteLocator {
 
-	public static final String DEFAULT_ROUTE = "/";
+	Collection<String> getRoutePaths();
 
-	private DiscoveryClient discovery;
-
-	private ZuulProperties properties;
-
-	private Field propertySourcesField;
-	private AtomicReference<LinkedHashMap<String, String>> routes = new AtomicReference<>();
-
-	public RouteLocator(DiscoveryClient discovery, ZuulProperties properties) {
-		this.discovery = discovery;
-		this.properties = properties;
-		initField();
-	}
-
-	private void initField() {
-		propertySourcesField = ReflectionUtils.findField(CompositePropertySource.class,
-				"propertySources");
-		propertySourcesField.setAccessible(true);
-	}
-
-	@Override
-	public void onApplicationEvent(EnvironmentChangeEvent event) {
-		for (String key : event.getKeys()) {
-			if (key.startsWith(properties.getMapping())) {
-				resetRoutes();
-				return;
-			}
-		}
-	}
-
-	public Map<String, String> getRoutes() {
-		if (routes.get() == null) {
-			return resetRoutes();
-		}
-
-		return routes.get();
-	}
-
-    //access so ZuulHandlerMapping actuator can reset it's mappings
-    /*package*/ Map<String, String> resetRoutes() {
-        LinkedHashMap<String, String> newValue = locateRoutes();
-        routes.set(newValue);
-        return newValue;
-    }
-
-    protected LinkedHashMap<String, String> locateRoutes() {
-		LinkedHashMap<String, String> routesMap = new LinkedHashMap<>();
-
-		// Add routes for discovery services by default
-		List<String> services = discovery.getServices();
-		for (String serviceId : services) {
-			// Ignore specified services
-			if (!properties.getIgnoredServices().contains(serviceId))
-				routesMap.put("/" + serviceId + "/**", serviceId);
-		}
-
-		addConfiguredRoutes(routesMap);
-
-		String defaultServiceId = routesMap.get(DEFAULT_ROUTE);
-
-		if (defaultServiceId != null) {
-			// move the defaultServiceId to the end
-			routesMap.remove(DEFAULT_ROUTE);
-			routesMap.put(DEFAULT_ROUTE, defaultServiceId);
-		}
-		return routesMap;
-	}
-
-	protected void addConfiguredRoutes(Map<String, String> routes) {
-		Map<String, String> routeEntries = properties.getRoute();
-		for (Map.Entry<String, String> entry : routeEntries.entrySet()) {
-			String serviceId = entry.getKey();
-			String route = entry.getValue()	;
-
-			if (routes.containsKey(route)) {
-				log.warn("Overwriting route {}: already defined by {}", route,
-						routes.get(route));
-			}
-			routes.put(route, serviceId);
-		}
-	}
 }

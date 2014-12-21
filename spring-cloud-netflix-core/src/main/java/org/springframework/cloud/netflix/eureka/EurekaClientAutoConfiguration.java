@@ -18,17 +18,15 @@ package org.springframework.cloud.netflix.eureka;
 import javax.annotation.PostConstruct;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.cloud.netflix.servo.ServoMetricReader;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import com.netflix.appinfo.EurekaInstanceConfig;
-import com.netflix.discovery.DiscoveryClient;
 import com.netflix.discovery.EurekaClientConfig;
 import com.netflix.discovery.converters.JsonXStream;
 import com.netflix.discovery.converters.XmlXStream;
@@ -40,19 +38,18 @@ import com.netflix.discovery.converters.XmlXStream;
 @Configuration
 @EnableConfigurationProperties
 @ConditionalOnClass(EurekaClientConfig.class)
-@ConditionalOnBean(DiscoveryClient.class)
 @ConditionalOnExpression("${eureka.client.enabled:true}")
 public class EurekaClientAutoConfiguration {
 
 	@Autowired
-	private DiscoveryClient discoveryClient;
+	ApplicationContext context;
 
 	@PostConstruct
 	public void init() {
 		XmlXStream.getInstance().setMarshallingStrategy(
-				new DataCenterAwareMarshallingStrategy());
+				new DataCenterAwareMarshallingStrategy(context));
 		JsonXStream.getInstance().setMarshallingStrategy(
-				new DataCenterAwareMarshallingStrategy());
+				new DataCenterAwareMarshallingStrategy(context));
 	}
 
 	@Bean
@@ -67,11 +64,5 @@ public class EurekaClientAutoConfiguration {
 		return new EurekaInstanceConfigBean();
 	}
 
-	@Bean
-	@ConditionalOnMissingBean
-	public EurekaHealthIndicator eurekaHealthIndicator(EurekaInstanceConfig config) {
-		return new EurekaHealthIndicator(discoveryClient, new ServoMetricReader(),
-				config);
-	}
 
 }

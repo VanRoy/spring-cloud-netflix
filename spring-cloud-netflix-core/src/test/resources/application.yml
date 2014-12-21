@@ -1,5 +1,8 @@
 server:
   port: 9999
+logging:
+  level:
+#    org.springframework.web: DEBUG
 spring:
   application:
     name: testclient
@@ -17,8 +20,12 @@ endpoints:
   health:
     sensitive: false
 zuul:
-  #mapping: /api
-  #strip-mapping: true
-  route:
-    testclient: /testing123/**
-    http://localhost:8081: /stores/**
+  #prefix: /api
+  #strip-prefix: true
+  routes:
+    test: 
+      serviceId: testclient
+      path: /testing123/**
+    stores:
+      url: http://localhost:8081
+      path: /stores/**

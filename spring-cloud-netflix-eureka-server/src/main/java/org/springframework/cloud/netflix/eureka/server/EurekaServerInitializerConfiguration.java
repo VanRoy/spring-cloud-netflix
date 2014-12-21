@@ -15,7 +15,9 @@
  */
 package org.springframework.cloud.netflix.eureka.server;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 
 import javax.servlet.ServletContext;
@@ -30,6 +32,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.logging.log4j.Log4JLoggingSystem;
 import org.springframework.cloud.netflix.eureka.DataCenterAwareMarshallingStrategy;
 import org.springframework.cloud.netflix.eureka.DiscoveryManagerInitializer;
 import org.springframework.cloud.netflix.eureka.EurekaServerConfigBean;
@@ -44,6 +47,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.util.ReflectionUtils;
 import org.springframework.web.context.ServletContextAware;
 
@@ -53,6 +57,7 @@ import com.netflix.discovery.converters.XmlXStream;
 import com.netflix.eureka.EurekaBootStrap;
 import com.netflix.eureka.EurekaServerConfig;
 import com.netflix.eureka.EurekaServerConfigurationManager;
+import com.netflix.eureka.InstanceRegistry;
 import com.netflix.eureka.PeerAwareInstanceRegistry;
 
 /**
@@ -84,33 +89,47 @@ public class EurekaServerInitializerConfiguration implements ServletContextAware
 		this.servletContext = servletContext;
 	}
 
-    @Bean
-    @ConditionalOnMissingBean(DiscoveryManagerInitializer.class)
-    public DiscoveryManagerInitializer discoveryManagerIntitializer() {
-        return new DiscoveryManagerInitializer();
-    }
+	@Bean
+	@ConditionalOnMissingBean(DiscoveryManagerInitializer.class)
+	public DiscoveryManagerInitializer discoveryManagerIntitializer() {
+		return new DiscoveryManagerInitializer();
+	}
 
 	@Override
 	public void start() {
-        discoveryManagerIntitializer().init();
-        new Thread(new Runnable() {
+		discoveryManagerIntitializer().init();
+		new Thread(new Runnable() {
 			@Override
 			public void run() {
 				try {
 					new EurekaBootStrap() {
 						@Override
 						protected void initEurekaEnvironment() {
+							try {
+								if (System.getProperty("log4j.configuration") == null) {
+									System.setProperty("log4j.configuration",
+											new ClassPathResource("log4j.properties",
+													Log4JLoggingSystem.class).getURL()
+													.toString());
+								}
+							}
+							catch (IOException e) {
+								// ignore
+							}
 							LoggingConfiguration.getInstance().configure();
 							EurekaServerConfigurationManager.getInstance()
 									.setConfiguration(eurekaServerConfig);
-							XmlXStream.getInstance().setMarshallingStrategy(new DataCenterAwareMarshallingStrategy());
-							JsonXStream.getInstance().setMarshallingStrategy(new DataCenterAwareMarshallingStrategy());
+							XmlXStream.getInstance().setMarshallingStrategy(
+									new DataCenterAwareMarshallingStrategy(applicationContext));
+							JsonXStream.getInstance().setMarshallingStrategy(
+									new DataCenterAwareMarshallingStrategy(applicationContext));
 							// PeerAwareInstanceRegistry.getInstance();
 							applicationContext
 									.publishEvent(new EurekaRegistryAvailableEvent(
 											eurekaServerConfig));
 						}
 					}.contextInitialized(new ServletContextEvent(servletContext));
+					logger.info("Started Eureka Server");
 					running = true;
 					applicationContext.publishEvent(new EurekaServerStartedEvent(
 							eurekaServerConfig));
@@ -172,9 +191,16 @@ public class EurekaServerInitializerConfiguration implements ServletContextAware
 		public void onApplicationEvent(EurekaRegistryAvailableEvent event) {
 			if (instance == null) {
 				instance = PeerAwareInstanceRegistry.getInstance();
+				safeInit();
 				replaceInstance(getProxyForInstance());
 				expectRegistrations(1);
 			}
+		}
+
+		private void safeInit() {
+			Method method = ReflectionUtils.findMethod(InstanceRegistry.class, "postInit");
+			ReflectionUtils.makeAccessible(method);
+			ReflectionUtils.invokeMethod(method, instance);
 		}
 
 		private void replaceInstance(Object proxy) {
@@ -229,12 +255,13 @@ public class EurekaServerInitializerConfiguration implements ServletContextAware
 		}
 
 		/**
-		 * Additional aspect for intercepting method invocations on PeerAwareInstanceRegistry.
-		 * If {@link PeerAwareInstanceRegistry#openForTraffic(int)} is called with a zero
+		 * Additional aspect for intercepting method invocations on
+		 * PeerAwareInstanceRegistry. If
+		 * {@link PeerAwareInstanceRegistry#openForTraffic(int)} is called with a zero
 		 * argument, it means that leases are not automatically cancelled if the instance
-		 * hasn't sent any renewals recently. This happens for a standalone server. It seems
-		 * like a bad default, so we set it to the smallest non-zero value we can, so that any
-		 * instances that subsequently register can bump up the threshold.
+		 * hasn't sent any renewals recently. This happens for a standalone server. It
+		 * seems like a bad default, so we set it to the smallest non-zero value we can,
+		 * so that any instances that subsequently register can bump up the threshold.
 		 * 
 		 * @author Dave Syer
 		 *
@@ -246,7 +273,7 @@ public class EurekaServerInitializerConfiguration implements ServletContextAware
 				if ("openForTraffic".equals(invocation.getMethod().getName())) {
 					int count = (int) invocation.getArguments()[0];
 					ReflectionUtils.invokeMethod(invocation.getMethod(),
-							invocation.getThis(), count==0 ? 1 : count);
+							invocation.getThis(), count == 0 ? 1 : count);
 					return null;
 				}
 				return invocation.proceed();

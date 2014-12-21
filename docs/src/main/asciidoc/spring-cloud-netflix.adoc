@@ -10,7 +10,13 @@ include::intro.adoc[]
 
 Service Discovery is one of the key tenets of a microservice based architecture. Trying to hand configure each client or some form of convention can be very difficult to do and can be very brittle.  Eureka is the Netflix Service Discovery Server and Client.  The server can be configured and deployed to be highly available, with each server replicating state about the registered services to the others.
 
-When clients register with Eureka, they provide eureka with meta-data about themselves such as host and port, health indicator URL, home page etc.  Eureka receives heartbeat messages from each instance belonging to a service.  If the heartbeat fails over a configurable timetable, the instance is normally removed from Eureka.
+=== Registering with Eureka
+
+When a client registers with Eureka, it provide meta-data about itself
+such as host and port, health indicator URL, home page etc.  Eureka
+receives heartbeat messages from each instance belonging to a service.
+If the heartbeat fails over a configurable timetable, the instance is
+normally removed from the registry.
 
 Example eureka client:
 
@@ -63,6 +69,18 @@ fine if you ensure that your application has a
 ID, or VIP).
 
 See {github-code}/spring-cloud-netflix-core/src/main/java/org/springframework/cloud/netflix/eureka/EurekaInstanceConfigBean.java[EurekaInstanceConfigBean] and {github-code}/spring-cloud-netflix-core/src/main/java/org/springframework/cloud/netflix/eureka/EurekaClientConfigBean.java[EurekaClientConfigBean] for more details of the configurable options.
+
+=== Making the Eureka Instance ID Unique
+
+By default a eureka instance is registered with an ID that is equal to its host name (i.e. only one service per host). Using Spring Cloud you can override this by providing a unique identifier in `eureka.instance.metadataMap.instanceId`. For example:
+
+.application.yml
+----
+eureka:
+  instance:
+    metadataMap:
+      instanceId: ${spring.application.name}:${spring.application.instance_id:${random.value}}
+----
 
 === Using the DiscoveryClient
 
@@ -366,7 +384,7 @@ One of the main benefits of Hystrix is the set of metrics it gathers about each 
 .Hystrix Dashboard
 image::Hystrix.png[]
 
-To run the Hystrix Dashboard annotate your Spring Boot main class with `@EnableHystrixDashboard`.  You then visit `/hystrix/index.html` and point the dashboard to an individual instances `/hystrix.stream` endpoint in a Hystrix client application.
+To run the Hystrix Dashboard annotate your Spring Boot main class with `@EnableHystrixDashboard`.  You then visit `/hystrix` and point the dashboard to an individual instances `/hystrix.stream` endpoint in a Hystrix client application.
 
 === Turbine
 
@@ -375,6 +393,8 @@ Looking at an individual instances Hystrix data is not very useful in terms of t
 `turbine.appConfig` is a list of eureka serviceId's that turbine will use to lookup instances.  `turbine.aggregator.clusterConfig` is used to group instances together.  This comes from the eureka `InstanceInfo`.  The clusterName is a SPEL expression evaluated against the InstanceInfo.  The default clusterNameExpression is `appName`.  The turbine stream is then used in the Hystrix dashboard using a url that looks like: http://my.turbine.sever:8080/turbine.stream?cluster=CUSTOMERS
 
 The `cluster` parameter must match an entry in `turbine.aggregator.clusterConfig`.
+
+Value returned from eureka are uppercase, thus the examples of all uppercase `CUSTOMERS`
 
 ----
 turbine:
@@ -398,12 +418,8 @@ Example spring boot app
 @ComponentScan
 @EnableAutoConfiguration
 @EnableEurekaClient
-public class Application extends FeignConfigurer {
-    @Bean
-    public StoreClient storeClient() {
-        //loadBalance plugs Feign into ribbon.  feign() works without load balancing.
-        return loadBalance(StoreClient.class, "http://stores");
-    }
+@FeignClientScan
+public class Application {
 
     public static void main(String[] args) {
         SpringApplication.run(Application.class, args);
@@ -415,6 +431,7 @@ public class Application extends FeignConfigurer {
 .StoreClient.java
 [source,java,indent=0]
 ----
+@FeignClient("stores")
 public interface StoreClient {
     @RequestMapping(method = RequestMethod.GET, value = "/stores")
     List<Store> getStores();
@@ -500,15 +517,113 @@ Zuul's rule engine allows rules and filters to be written in essentially any JVM
 [[netflix-zuul-reverse-proxy]]
 === Embedded Zuul Reverse Proxy
 
-Spring Cloud has created an embedded Zuul proxy to ease the development of a very common use case where a UI application wants to proxy calls to one or more back end services.  To enable it, annotate a Spring Boot main class with `@EnableZuulProxy`.  This forwards local calls to the appropriate service.  By convention, a service with the `spring.application.name` of `users`, will receive requests from the proxy located at `/users`.  The proxy uses Ribbon to locate an instance to forward to via Eureka.  To skip having a service automatically added from eureka, set `zuul.ignored-services = service1`. Forwarding to the service is protected by a Hystrix circuit breaker.  Additional rules can be configured via the Spring environment.  The Config Server is an ideal place for the Zuul configuration.  Zuul Embedded Proxy configuration rules look like the following:
+Spring Cloud has created an embedded Zuul proxy to ease the
+development of a very common use case where a UI application wants to
+proxy calls to one or more back end services.  This feature is useful
+for a user interface to proxy to the backend services it requires,
+avoiding the need to manage CORS and authentication concerns
+independently for all the backends.
 
- zuul.route.users: /myusers/**
+To enable it, annotate a Spring Boot main class with
+`@EnableZuulProxy`, and this forwards local calls to the appropriate
+service.  By convention, a service with the Eureka ID "users", will
+receive requests from the proxy located at `/users` (with the prefix
+stripped). The proxy uses Ribbon to locate an instance to forward to
+via Eureka, and all requests are executed in a hystrix command, so
+failures will show up in Hystrix metrics, and once the circuit is open
+the proxy will not try to contact the service.
 
-This means that http calls to /myusers get forwarded to the users service.  This proxy configuration is useful for services that host a user interface to proxy to the backend services it requires.  To add a prefix to the mapping, set `zuul.proxy.mapping` to a value, such as `/api`.  To strip the proxy mapping from the request before forwarding set `zuul.proxy.strip-mapping = true`.
+To skip having a service automatically added, set
+`zuul.ignored-services` to a list of service ids. To augment or change
+the proxy routes, you can add external configuration like the
+following:
 
-The Zuul proxy supports Ant-style patterns.
+.application.yml
+[source,yaml]
+----
+ zuul:
+  routes:
+    users: /myusers/**
+----
 
-The `X-Forwarded-Host` header added to the forwarded requests by default.  To turn it off set `zuul.proxy.add-proxy-headers = false`.
+This means that http calls to "/myusers" get forwarded to the "users"
+service (for example "/myusers/101" is forwarded to "/101").
 
-An application with the `@EnableZuulProxy` could act as a standalone server if you set a default route, for example `zuul.route.home: /` would route `/` to the home service.
+To get more fine-grained control over a route you can specify the path
+and the serviceId independently:
 
+.application.yml
+[source,yaml]
+----
+ zuul:
+  routes:
+    users:
+      path: /myusers/**
+      serviceId: users_service
+----
+
+This means that http calls to "/myusers" get forwarded to the
+"users_service" service.  The route has to have a "path" which can be
+specified as an ant-style pattern, so "/myusers/*" only matches one
+level, but "/myusers/**" matches hierarchically. 
+
+The location of the backend can be specified as either a "serviceId"
+(for a Eureka service) or a "url" (for a physical location), e.g.
+
+.application.yml
+[source,yaml]
+----
+ zuul:
+  routes:
+    users:
+      path: /myusers/**
+      url: http://example.com/users_service
+----
+
+To add a prefix to all mappings, set `zuul.prefix` to a value, such as
+`/api`. The proxy prefix is stripped from the request before the
+request is forwarded by default (switch this behaviour off with
+`zuul.stripPrefix=false`). You can also switch off the stripping of
+the service-specific prefix from individual routes, e.g.
+
+.application.yml
+[source,yaml]
+----
+ zuul:
+  routes:
+    users:
+      path: /myusers/**
+      stripPrefix: false
+----
+
+In this example requests to "/myusers/101" will be forwarded to "/myusers/101" on the "users" service.
+
+The `X-Forwarded-Host` header added to the forwarded requests by
+default.  To turn it off set `zuul.addProxyHeaders = false`.  The
+prefix path is stripped by default, and the request to the backend
+picks up a header "X-Forwarded-Prefix" ("/myusers" in the examples
+above).
+
+An application with the `@EnableZuulProxy` could act as a standalone
+server if you set a default route ("/"), for example `zuul.route.home:
+/` would route all traffic (i.e. "/**") to the "home" service.
+
+=== Plain Embedded Zuul
+
+You can also run a Zuul server without the proxying, or switch on parts of the proxying platform selectively, if you
+use `@EnableZuulServer` (instead of `@EnableZuulProxy`). Any beans that you add to the application of type `ZuulFilter`
+will be installed automatically.
+
+In this case the routes into the Zuul server are 
+still specified by configuring "zuul.routes.*", but there is no service discovery and no proxying, so the
+"serviceId" and "url" settings are ignored. For example:
+
+.application.yml
+[source,yaml]
+----
+ zuul:
+  routes:
+    api: /api/**
+----
+
+maps all paths in "/api/**" to the Zuul filter chain.
